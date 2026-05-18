@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Focus Session - Focus Monitor</title>
+    <link rel="stylesheet" href="css/style.css" />
+</head>
+
+<body>
+
+    <div id="toast" class="toast" style="display:none;"></div>
+
+    <div class="session-wrapper">
+        <div class="session-header">
+            <a href="dashboard.html">← Back</a>
+            <h1>Focus Monitor</h1>
+            <span id="username-display"></span>
+        </div>
+
+        <!-- Face Registration Panel -->
+        <div id="face-reg-panel" class="card" style="display:none;">
+            <h2>👤 First Time Setup — Register Your Face</h2>
+            <p style="color:#aaa;">Position your face clearly in the camera and click Register.</p>
+            <div class="cam-container">
+                <video id="reg-webcam" autoplay playsinline muted></video>
+                <div id="reg-badge" class="focus-badge focus-unknown">Starting camera...</div>
+            </div>
+            <button type="button" id="reg-btn" onclick="registerFace()">📸 Register My Face</button>
+        </div>
+
+        <!-- Setup Panel -->
+        <div id="setup-panel" class="card" style="display:none;">
+            <h2>Start a Focus Session</h2>
+            <div id="today-plan-box" style="margin-bottom:10px;"></div>
+            <label>Subject</label>
+            <input type="text" id="subject" placeholder="e.g. Mathematics, Physics..." />
+            <label>Duration (minutes)</label>
+            <input type="number" id="duration" placeholder="e.g. 25" min="1" max="180" />
+            <button type="button" id="start-btn">▶ Start Session</button>
+        </div>
+
+        <!-- Timer Panel -->
+        <div id="timer-panel" class="card" style="display:none;">
+            <h2 id="session-subject-display">Studying: -</h2>
+
+            <div class="cam-container">
+                <video id="webcam" autoplay playsinline muted></video>
+                <div id="focus-badge" class="focus-badge focus-unknown">Starting camera...</div>
+            </div>
+
+            <!-- Focus Score -->
+            <div class="focus-bar-wrapper">
+                <span>Focus Score</span>
+                <span id="focus-percent">100%</span>
+            </div>
+            <div class="focus-bar-bg">
+                <div class="focus-bar-fill" id="focus-bar-fill" style="width:100%; background:#4caf50;"></div>
+            </div>
+
+            <!-- Distraction warning bar -->
+            <div id="distraction-bar" style="display:none;" class="phone-warning-bar">
+                <span id="distraction-icon">⚠️</span> <span id="distraction-label">Face not visible</span> — Auto-abandon in: <span id="distraction-countdown" style="font-weight:bold; color:#ff6b6b;">120s</span>
+            </div>
+
+            <div class="timer-display" id="timer-display">00:00</div>
+            <div style="text-align:center; color:#aaa; font-size:13px; margin-top:-10px;">Time remaining</div>
+
+            <div class="timer-controls">
+                <button type="button" id="pause-btn" onclick="togglePause()">Pause</button>
+                <button type="button" onclick="stopSession('completed')" class="btn-green">Complete ✅</button>
+                <button type="button" onclick="stopSession('abandoned')" class="btn-red">Abandon ❌</button>
+            </div>
+        </div>
+
+        <!-- Result Panel -->
+        <div id="result-panel" class="card" style="display:none;">
+            <h2 id="result-title">Session Complete ✅</h2>
+            <p id="result-text"></p>
+            <p id="result-focus" style="margin-top:8px;"></p>
+            <p id="result-distraction" style="margin-top:8px; color:#ff9800;"></p>
+            <button type="button" onclick="resetSession()" style="margin-top:16px;">Start New Session</button>
+            <button type="button" class="btn-outline" onclick="window.location.href='dashboard.html'" style="margin-top:8px;">Go to Dashboard</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
+
+    <script>
+        var API = "http://localhost:8000";
+        var token = localStorage.getItem("token");
+        var username = localStorage.getItem("username");
+        if (!token) window.location.href = "index.html";
+        if (username) document.getElementById("username-display").textContent = username;
+
+        var headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + token
+        };
+
+        // ── Core state ─────────────────────────────────────────
+        var sessionId = null;
+        var timerInterval = null;
+        var focusTrackerInterval = null;
+        var secondsElapsed = 0;
+        var isPaused = false;
+        var manualPause = false;
+        var plannedSeconds = 0;
+        var currentSubject = "";
+
+        // ── Scoring ────────────────────────────────────────────
+        // Simple model: every second is either FOCUSED or DISTRACTED
+        // Phone/away = DISTRACTED. Score = focusedSeconds / totalSeconds * 100
+        var focusedSeconds = 0;
+        var totalSeconds = 0;
+
+        // ── Face detection state ───────────────────────────────
+        var faceVisible = false; // updated by MediaPipe every frame
+        var faceAbsentStreak = 0; // consecutive seconds face not seen
+        var ABANDON_LIMIT = 120; // 2 minutes continuous absence = auto abandon
+        var warn30sent = false;
+        var warn60sent = false;
+        var warn90sent = false;
+
+        // ── Session warnings ───────────────────────────────────
+        var warned80pct = false;
+        var warnedTimeUp = false;
+        var warnedBreak = false;
+
+        if (Notification.permission === "default") Notification.requestPermission();
+
+        // ── Toast ──────────────────────────────────────────────
+        function showToast(msg, type) {
+            var t = document.getElementById("toast");
+            t.textContent = msg;
+            t.className = "toast toast-" + (type || "info");
+            t.style.display = "block";
+            clearTimeout(window._toastTimer);
+            window._toastTimer = setTimeout(function() {
+                t.style.display = "none";
+            }, 7000);
+            if (Notification.permission === "granted") {
+                new Notification("Focus Monitor", {
+                    body: msg
+                });
+            }
+        }
+
+        // ── Face Registration ──────────────────────────────────
+        async function checkFaceStatus() {
+            try {
+                var res = await fetch(API + "/planner/face-status", {
+                    headers: headers
+                });
+                var data = await res.json();
+                if (!data.face_registered) {
+                    document.getElementById("face-reg-panel").style.display = "block";
+                    startRegCamera();
+                } else {
+                    document.getElementById("setup-panel").style.display = "block";
+                    loadTodayPlan();
+                }
+            } catch (e) {
+                document.getElementById("setup-panel").style.display = "block";
+                loadTodayPlan();
+            }
+        }
+
+        function startRegCamera() {
+            var video = document.getElementById("reg-webcam");
+            var badge = document.getElementById("reg-badge");
+            navigator.mediaDevices.getUserMedia({
+                    video: true
+                })
+                .then(function(stream) {
+                    video.srcObject = stream;
+                    badge.textContent = "✅ Camera ready — position your face";
+                    badge.className = "focus-badge focus-yes";
+                })
+                .catch(function() {
+                    badge.textContent = "❌ Camera blocked";
+                    badge.className = "focus-badge focus-no";
+                });
+        }
+
+        async function registerFace() {
+            var btn = document.getElementById("reg-btn");
+            btn.textContent = "Registering...";
+            btn.disabled = true;
+            var video = document.getElementById("reg-webcam");
+            if (video.srcObject) video.srcObject.getTracks().forEach(function(t) {
+                t.stop();
+            });
+            try {
+                await fetch(API + "/planner/register-face", {
+                    method: "POST",
+                    headers: headers
+                });
+                showToast("✅ Face registered!", "success");
+                setTimeout(function() {
+                    document.getElementById("face-reg-panel").style.display = "none";
+                    document.getElementById("setup-panel").style.display = "block";
+                    loadTodayPlan();
+                }, 1500);
+            } catch (e) {
+                btn.textContent = "📸 Register My Face";
+                btn.disabled = false;
+                showToast("Failed. Try again.", "error");
+            }
+        }
+
+        // ── Today's Plan ───────────────────────────────────────
+        async function loadTodayPlan() {
+            try {
+                var res = await fetch(API + "/planner/today", {
+                    headers: headers
+                });
+                var plans = await res.json();
+                var box = document.getElementById("today-plan-box");
+                if (!plans.length) {
+                    box.innerHTML = "<p style='color:#aaa; font-size:13px;'>No plan today. <a href='dashboard.html'>Add on dashboard.</a></p>";
+                    return;
+                }
+                var html = "<div style='font-size:13px; color:#aaa; margin-bottom:6px;'>📋 Today's Plan — click to fill:</div>";
+                plans.forEach(function(p) {
+                    var pct = Math.min(100, Math.round((p.done_minutes / p.planned_minutes) * 100));
+                    var color = p.completed ? "#4caf50" : "#4f9cf9";
+                    html += "<div class='plan-item' onclick='fillSubject(\"" + p.subject + "\"," + p.planned_minutes + ")'>";
+                    html += "<div style='display:flex;justify-content:space-between;'><span>" + p.subject + (p.completed ? " ✅" : "") + "</span>";
+                    html += "<span style='color:" + color + ";'>" + p.done_minutes + "/" + p.planned_minutes + "m</span></div>";
+                    html += "<div class='focus-bar-bg' style='margin-top:4px;height:6px;'><div class='focus-bar-fill' style='width:" + pct + "%;background:" + color + ";height:6px;'></div></div>";
+                    html += "</div>";
+                });
+                box.innerHTML = html;
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function fillSubject(subject, minutes) {
+            document.getElementById("subject").value = subject;
+            document.getElementById("duration").value = minutes;
+        }
+
+        // ── Start Session ──────────────────────────────────────
+        document.getElementById("start-btn").addEventListener("click", startSession);
+
+        async function startSession() {
+            var subject = document.getElementById("subject").value.trim();
+            var duration = parseInt(document.getElementById("duration").value);
+            if (!subject || !duration || duration < 1) {
+                alert("Please enter subject and duration.");
+                return;
+            }
+
+            // Plan duration warning
+            try {
+                var res = await fetch(API + "/planner/today", {
+                    headers: headers
+                });
+                var plans = await res.json();
+                var plan = plans.find(function(p) {
+                    return p.subject.toLowerCase() === subject.toLowerCase();
+                });
+                if (plan && duration > plan.planned_minutes) {
+                    var ok = confirm("⚠️ You planned " + plan.planned_minutes + "m for " + subject + " but setting " + duration + "m. Continue?");
+                    if (!ok) return;
+                }
+            } catch (e) {}
+
+            var sessionRes = await fetch(API + "/session/start", {
+                method: "POST",
+                headers: headers,
+                body: JSON.stringify({
+                    subject: subject,
+                    planned_duration: duration
+                })
+            });
+            var data = await sessionRes.json();
+            if (!sessionRes.ok) {
+                alert("Error: " + (data.detail || "Failed"));
+                return;
+            }
+
+            // Reset everything
+            sessionId = data.session_id;
+            plannedSeconds = duration * 60;
+            currentSubject = subject;
+            secondsElapsed = 0;
+            focusedSeconds = 0;
+            totalSeconds = 0;
+            faceVisible = false;
+            faceAbsentStreak = 0;
+            warn30sent = false;
+            warn60sent = false;
+            warn90sent = false;
+            warned80pct = false;
+            warnedTimeUp = false;
+            warnedBreak = false;
+            isPaused = false;
+            manualPause = false;
+
+            document.getElementById("setup-panel").style.display = "none";
+            document.getElementById("timer-panel").style.display = "block";
+            document.getElementById("session-subject-display").textContent = "Studying: " + subject;
+            document.getElementById("distraction-bar").style.display = "none";
+            document.getElementById("focus-bar-fill").style.width = "100%";
+            document.getElementById("focus-bar-fill").style.background = "#4caf50";
+            document.getElementById("focus-percent").textContent = "100%";
+            document.getElementById("pause-btn").textContent = "Pause";
+
+            setupCamera();
+
+            // ── Master tracker — runs every second ───────────────
+            focusTrackerInterval = setInterval(function() {
+                if (isPaused) return;
+
+                totalSeconds++;
+
+                if (faceVisible) {
+                    // ✅ Face seen = focused
+                    focusedSeconds++;
+                    faceAbsentStreak = 0;
+
+                    // Reset distraction bar and warnings when face returns
+                    document.getElementById("distraction-bar").style.display = "none";
+                    document.getElementById("focus-badge").textContent = "✅ Focused";
+                    document.getElementById("focus-badge").className = "focus-badge focus-yes";
+
+                    // Reset absent warnings so they fire again next time
+                    warn30sent = false;
+                    warn60sent = false;
+                    warn90sent = false;
+
+                } else {
+                    // ❌ Face NOT seen = distracted (phone, away, looking down)
+                    faceAbsentStreak++;
+
+                    // Show distraction bar
+                    var remaining = ABANDON_LIMIT - faceAbsentStreak;
+                    document.getElementById("distraction-bar").style.display = "block";
+                    document.getElementById("distraction-countdown").textContent = Math.max(0, remaining) + "s";
+                    document.getElementById("focus-badge").textContent = "❌ Not focused!";
+                    document.getElementById("focus-badge").className = "focus-badge focus-no";
+
+                    // Detect if it looks like phone (face gone but session still running)
+                    var label = faceAbsentStreak > 5 ? "📱 Possible phone use" : "⚠️ Face not visible";
+                    document.getElementById("distraction-label").textContent = label;
+
+                    // Escalating warnings
+                    if (faceAbsentStreak === 30 && !warn30sent) {
+                        warn30sent = true;
+                        showToast("⚠️ 30 seconds distracted! Put down the phone and focus.", "warning");
+                    }
+                    if (faceAbsentStreak === 60 && !warn60sent) {
+                        warn60sent = true;
+                        showToast("📱 1 minute distracted! Session will auto-abandon in 60 seconds.", "error");
+                    }
+                    if (faceAbsentStreak === 90 && !warn90sent) {
+                        warn90sent = true;
+                        showToast("🚨 90 seconds away! Last warning — abandon in 30 seconds!", "error");
+                    }
+
+                    // AUTO ABANDON at 2 minutes continuous distraction
+                    if (faceAbsentStreak >= ABANDON_LIMIT) {
+                        showToast("🛑 Session auto-abandoned — 2 minutes without focus!", "error");
+                        clearInterval(focusTrackerInterval);
+                        clearInterval(timerInterval);
+                        stopSession("abandoned");
+                        return;
+                    }
+                }
+
+                // Update score every second
+                updateScore();
+
+            }, 1000);
+
+            // ── Main countdown timer ─────────────────────────────
+            timerInterval = setInterval(function() {
+                if (!isPaused) {
+                    secondsElapsed++;
+                    updateTimerDisplay();
+                    checkSessionWarnings();
+                    if (secondsElapsed >= plannedSeconds) {
+                        clearInterval(timerInterval);
+                        clearInterval(focusTrackerInterval);
+                        stopSession("completed");
+                    }
+                }
+            }, 1000);
+        }
+
+        // ── Score update ───────────────────────────────────────
+        function updateScore() {
+            if (totalSeconds === 0) return;
+            var score = Math.round((focusedSeconds / totalSeconds) * 100);
+            score = Math.max(0, Math.min(100, score));
+            document.getElementById("focus-percent").textContent = score + "%";
+            var bar = document.getElementById("focus-bar-fill");
+            bar.style.width = score + "%";
+            bar.style.background = score >= 70 ? "#4caf50" : score >= 40 ? "#ff9800" : "#f44336";
+        }
+
+        // ── MediaPipe Face Detection ───────────────────────────
+        function setupCamera() {
+            var videoEl = document.getElementById("webcam");
+
+            var fd = new FaceDetection({
+                locateFile: function(file) {
+                    return "https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/" + file;
+                }
+            });
+
+            fd.setOptions({
+                model: "short",
+                minDetectionConfidence: 0.6
+            });
+
+            fd.onResults(function(results) {
+                // Simply: face found or not. That's the only signal we need.
+                faceVisible = !!(results.detections && results.detections.length > 0);
+            });
+
+            var camera = new Camera(videoEl, {
+                onFrame: async function() {
+                    await fd.send({
+                        image: videoEl
+                    });
+                },
+                width: 320,
+                height: 240
+            });
+
+            camera.start().catch(function(err) {
+                console.error("Camera error:", err);
+                document.getElementById("focus-badge").textContent = "❌ Camera blocked";
+                document.getElementById("focus-badge").className = "focus-badge focus-no";
+            });
+        }
+
+        // ── Session time warnings ──────────────────────────────
+        function checkSessionWarnings() {
+            var pct = secondsElapsed / plannedSeconds;
+            if (!warned80pct && pct >= 0.8) {
+                warned80pct = true;
+                showToast("⏰ 80% done! " + Math.ceil((plannedSeconds - secondsElapsed) / 60) + " min(s) left.", "warning");
+            }
+            if (!warnedTimeUp && secondsElapsed >= plannedSeconds - 1) {
+                warnedTimeUp = true;
+                showToast("⏱️ Time's up for " + currentSubject + "! Take a break.", "warning");
+            }
+            if (!warnedBreak && secondsElapsed >= plannedSeconds + 300) {
+                warnedBreak = true;
+                showToast("🛑 " + Math.floor(secondsElapsed / 60) + " mins in! You need a break.", "error");
+            }
+        }
+
+        // ── Timer display ──────────────────────────────────────
+        function updateTimerDisplay() {
+            var remaining = plannedSeconds - secondsElapsed;
+            var isOver = remaining < 0;
+            var abs = Math.abs(remaining);
+            var mins = Math.floor(abs / 60);
+            var secs = abs % 60;
+            var el = document.getElementById("timer-display");
+            el.textContent = (isOver ? "+" : "") + String(mins).padStart(2, "0") + ":" + String(secs).padStart(2, "0");
+            el.style.color = isOver ? "#ff6b6b" : "#4f9cf9";
+        }
+
+        function togglePause() {
+            manualPause = !manualPause;
+            isPaused = manualPause;
+            document.getElementById("pause-btn").textContent = isPaused ? "Resume" : "Pause";
+        }
+
+        // ── Stop Session ───────────────────────────────────────
+        async function stopSession(status) {
+            clearInterval(timerInterval);
+            clearInterval(focusTrackerInterval);
+
+            var actualMinutes = Math.ceil(secondsElapsed / 60);
+            var focusScore = totalSeconds > 0 ?
+                Math.round((focusedSeconds / totalSeconds) * 100) :
+                0;
+            focusScore = Math.max(0, Math.min(100, focusScore));
+
+            var distractedSecs = totalSeconds - focusedSeconds;
+
+            try {
+                await fetch(API + "/session/end", {
+                    method: "POST",
+                    headers: headers,
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        actual_duration: actualMinutes,
+                        status: status,
+                        focus_score: focusScore
+                    })
+                });
+            } catch (e) {
+                console.error(e);
+            }
+
+            // Stop camera
+            var video = document.getElementById("webcam");
+            if (video.srcObject) video.srcObject.getTracks().forEach(function(t) {
+                t.stop();
+            });
+
+            document.getElementById("timer-panel").style.display = "none";
+            document.getElementById("result-panel").style.display = "block";
+
+            var mins = Math.floor(secondsElapsed / 60);
+            var secs = secondsElapsed % 60;
+
+            document.getElementById("result-title").textContent =
+                status === "completed" ? "Session Complete ✅" : "Session Abandoned ❌";
+
+            document.getElementById("result-text").textContent =
+                status === "completed" ?
+                "Great work! You studied for " + mins + "m " + secs + "s." :
+                "Session stopped after " + mins + "m " + secs + "s.";
+
+            document.getElementById("result-focus").textContent =
+                "Focus Score: " + focusScore + "% — " +
+                (focusScore >= 70 ? "Excellent! 🌟" : focusScore >= 40 ? "Good effort 👍" : "Needs improvement 💪");
+
+            if (distractedSecs > 10) {
+                document.getElementById("result-distraction").textContent =
+                    "⚠️ Distracted for " + Math.ceil(distractedSecs / 60) + " min(s). Keep your phone away next time!";
+            }
+        }
+
+        // ── Reset ──────────────────────────────────────────────
+        function resetSession() {
+            sessionId = null;
+            secondsElapsed = 0;
+            focusedSeconds = 0;
+            totalSeconds = 0;
+            faceVisible = false;
+            faceAbsentStreak = 0;
+            isPaused = false;
+            manualPause = false;
+
+            document.getElementById("setup-panel").style.display = "block";
+            document.getElementById("result-panel").style.display = "none";
+            document.getElementById("subject").value = "";
+            document.getElementById("duration").value = "";
+            document.getElementById("focus-bar-fill").style.width = "100%";
+            document.getElementById("focus-bar-fill").style.background = "#4caf50";
+            document.getElementById("focus-percent").textContent = "100%";
+            document.getElementById("distraction-bar").style.display = "none";
+            document.getElementById("distraction-countdown").textContent = "120s";
+            document.getElementById("pause-btn").textContent = "Pause";
+            document.getElementById("result-distraction").textContent = "";
+
+            loadTodayPlan();
+        }
+
+        // ── Init ───────────────────────────────────────────────
+        checkFaceStatus();
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard — Focus Monitor</title>
+    <link rel="stylesheet" href="css/style.css" />
+</head>
+
+<body>
+    <div id="navbar"></div>
+
+    <div id="toast" class="toast" style="display:none;"></div>
+
+    <div class="page-wrapper">
+
+        <!-- Stats row -->
+        <div class="stats-grid" style="margin-bottom:24px;">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-sessions">0</div>
+                <div class="stat-label">Total Sessions</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-time">0m</div>
+                <div class="stat-label">Study Time</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-focus">0%</div>
+                <div class="stat-label">Avg Focus</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-streak">0</div>
+                <div class="stat-label">🔥 Streak</div>
+            </div>
+        </div>
+
+        <!-- Quick actions -->
+        <div class="dash-cards" style="margin-bottom:24px;">
+            <div class="dash-card" onclick="window.location.href='session.html'">
+                <div class="dash-icon">▶</div>
+                <h3>Start Session</h3>
+                <p>Begin a focused study session with live AI monitoring</p>
+            </div>
+            <div class="dash-card" onclick="window.location.href='analytics.html'">
+                <div class="dash-icon">📊</div>
+                <h3>Analytics</h3>
+                <p>View focus scores, study time and session history</p>
+            </div>
+        </div>
+
+        <!-- Daily Planner -->
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3>📋 Today's Study Plan</h3>
+                <span id="today-date" style="color:#aaa; font-size:13px;"></span>
+            </div>
+
+            <p style="color:#aaa; font-size:13px; margin-top:-8px;">
+                Add subjects you want to study today with a time goal.
+            </p>
+
+            <!-- Add plan row -->
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <input type="text" id="plan-subject" placeholder="Subject (e.g. Mathematics)" style="flex:2; min-width:150px;" />
+                <input type="number" id="plan-minutes" placeholder="Minutes" min="5" max="480" style="flex:1; min-width:80px;" />
+                <button type="button" onclick="addPlan()" style="width:auto; padding:10px 20px; white-space:nowrap;">
+          + Add Subject
+        </button>
+            </div>
+
+            <!-- Status message -->
+            <div id="plan-status" style="display:none; font-size:13px; padding:8px 12px; border-radius:8px;"></div>
+
+            <!-- Plan list -->
+            <div id="plan-list">
+                <p style="color:#aaa; font-size:13px;">Loading your plan...</p>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="js/nav.js"></script>
+    <script>
+        var API = "http://localhost:8000";
+        var token = localStorage.getItem("token");
+        if (!token) window.location.href = "index.html";
+
+        var headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + token
+        };
+
+        renderNav("dashboard");
+
+        // Show today's date
+        document.getElementById("today-date").textContent = new Date().toLocaleDateString("en-IN", {
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric"
+        });
+
+        // ── Toast ─────────────────────────────────────────────
+        function showToast(msg, type) {
+            var t = document.getElementById("toast");
+            t.textContent = msg;
+            t.className = "toast toast-" + (type || "info");
+            t.style.display = "block";
+            clearTimeout(window._toastTimer);
+            window._toastTimer = setTimeout(function() {
+                t.style.display = "none";
+            }, 4000);
+        }
+
+        function showStatus(msg, isError) {
+            var el = document.getElementById("plan-status");
+            el.textContent = msg;
+            el.style.display = "block";
+            el.style.background = isError ? "#2a1010" : "#0f2a1a";
+            el.style.color = isError ? "#ff6b6b" : "#4caf50";
+            el.style.border = "1px solid " + (isError ? "#ff4444" : "#4caf50");
+            clearTimeout(window._statusTimer);
+            window._statusTimer = setTimeout(function() {
+                el.style.display = "none";
+            }, 3000);
+        }
+
+        // ── Load Stats ────────────────────────────────────────
+        async function loadStats() {
+            try {
+                var res = await fetch(API + "/analytics/summary", {
+                    headers: headers
+                });
+                if (!res.ok) throw new Error("Status " + res.status);
+                var d = await res.json();
+                document.getElementById("stat-sessions").textContent = d.total_sessions;
+                var h = Math.floor(d.total_minutes / 60);
+                var m = d.total_minutes % 60;
+                document.getElementById("stat-time").textContent = h > 0 ? h + "h " + m + "m" : m + "m";
+                document.getElementById("stat-focus").textContent = d.avg_focus_score + "%";
+                document.getElementById("stat-streak").textContent = d.streak + " days";
+            } catch (e) {
+                console.error("Stats error:", e);
+            }
+        }
+
+        // ── Load Plans ────────────────────────────────────────
+        async function loadPlans() {
+            var el = document.getElementById("plan-list");
+            try {
+                var res = await fetch(API + "/planner/today", {
+                    headers: headers
+                });
+                console.log("Plan load status:", res.status);
+
+                if (!res.ok) {
+                    var errData = await res.json();
+                    console.error("Plan load error:", errData);
+                    el.innerHTML = "<p style='color:#ff6b6b; font-size:13px;'>Error loading plan: " + (errData.detail || res.status) + "</p>";
+                    return;
+                }
+
+                var plans = await res.json();
+                console.log("Plans loaded:", plans);
+
+                if (!plans.length) {
+                    el.innerHTML = "<p style='color:#aaa; font-size:13px;'>No subjects added yet. Add one above to get started!</p>";
+                    return;
+                }
+
+                var html = "";
+                plans.forEach(function(p) {
+                    var pct = Math.min(100, Math.round((p.done_minutes / p.planned_minutes) * 100));
+                    var color = p.completed ? "#4caf50" : "#4f9cf9";
+                    html += "<div class='plan-row'>";
+                    html += "<div style='flex:1;'>";
+                    html += "<div style='display:flex; justify-content:space-between; margin-bottom:8px;'>";
+                    html += "<span style='font-weight:600; font-size:15px;'>" + p.subject;
+                    if (p.completed) html += " ✅";
+                    html += "</span>";
+                    html += "<span style='color:" + color + "; font-size:13px; font-weight:600;'>";
+                    html += p.done_minutes + " / " + p.planned_minutes + " min";
+                    html += "</span></div>";
+                    html += "<div class='focus-bar-bg'>";
+                    html += "<div class='focus-bar-fill' style='width:" + pct + "%; background:" + color + ";'></div>";
+                    html += "</div>";
+                    if (p.completed) {
+                        html += "<p style='color:#4caf50; font-size:12px; margin-top:6px;'>✅ Goal reached!</p>";
+                    } else {
+                        var left = p.planned_minutes - p.done_minutes;
+                        html += "<p style='color:#aaa; font-size:12px; margin-top:6px;'>" + left + " min remaining today</p>";
+                    }
+                    html += "</div>";
+                    html += "<button type='button' onclick='removePlan(" + p.id + ")' ";
+                    html += "style='background:#c62828; width:auto; padding:6px 12px; font-size:12px; margin-left:14px; flex-shrink:0;'>";
+                    html += "✕ Remove</button>";
+                    html += "</div>";
+                });
+
+                el.innerHTML = html;
+
+            } catch (e) {
+                console.error("Load plans exception:", e);
+                el.innerHTML = "<p style='color:#ff6b6b; font-size:13px;'>Failed to load plan. Check console.</p>";
+            }
+        }
+
+        // ── Add Plan ──────────────────────────────────────────
+        async function addPlan() {
+            var subjectEl = document.getElementById("plan-subject");
+            var minutesEl = document.getElementById("plan-minutes");
+
+            var subject = subjectEl.value.trim();
+            var minutes = parseInt(minutesEl.value);
+
+            console.log("Adding plan:", subject, minutes);
+
+            if (!subject) {
+                showStatus("Please enter a subject name.", true);
+                subjectEl.focus();
+                return;
+            }
+
+            if (!minutes || minutes < 5) {
+                showStatus("Please enter at least 5 minutes.", true);
+                minutesEl.focus();
+                return;
+            }
+
+            // Disable button while saving
+            var btn = document.querySelector("button[onclick='addPlan()']");
+            btn.textContent = "Adding...";
+            btn.disabled = true;
+
+            try {
+                var res = await fetch(API + "/planner/add", {
+                    method: "POST",
+                    headers: headers,
+                    body: JSON.stringify({
+                        subject: subject,
+                        planned_minutes: minutes
+                    })
+                });
+
+                console.log("Add plan response status:", res.status);
+                var data = await res.json();
+                console.log("Add plan response data:", data);
+
+                if (res.ok) {
+                    subjectEl.value = "";
+                    minutesEl.value = "";
+                    showStatus("✅ " + subject + " added to today's plan!", false);
+                    await loadPlans();
+                } else {
+                    showStatus("Error: " + (data.detail || "Failed to add. Try again."), true);
+                }
+
+            } catch (e) {
+                console.error("Add plan exception:", e);
+                showStatus("Cannot connect to server. Is backend running?", true);
+            } finally {
+                btn.textContent = "+ Add Subject";
+                btn.disabled = false;
+            }
+        }
+
+        // ── Remove Plan ───────────────────────────────────────
+        async function removePlan(id) {
+            if (!confirm("Remove this subject from today's plan?")) return;
+            try {
+                var res = await fetch(API + "/planner/remove/" + id, {
+                    method: "DELETE",
+                    headers: headers
+                });
+                console.log("Remove plan status:", res.status);
+                if (res.ok) {
+                    showStatus("Subject removed.", false);
+                    await loadPlans();
+                } else {
+                    showStatus("Failed to remove.", true);
+                }
+            } catch (e) {
+                console.error("Remove plan exception:", e);
+                showStatus("Cannot connect to server.", true);
+            }
+        }
+
+        // ── Allow Enter key on inputs ─────────────────────────
+        document.getElementById("plan-minutes").addEventListener("keydown", function(e) {
+            if (e.key === "Enter") addPlan();
+        });
+        document.getElementById("plan-subject").addEventListener("keydown", function(e) {
+            if (e.key === "Enter") document.getElementById("plan-minutes").focus();
+        });
+
+        // ── Init ──────────────────────────────────────────────
+        loadStats();
+        loadPlans();
+    </script>
+</body>
+
+</html>

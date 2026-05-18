@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Analytics — Focus Monitor</title>
+    <link rel="stylesheet" href="css/style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+    <div id="navbar"></div>
+
+    <div class="page-wrapper">
+
+        <h2 style="margin-bottom:20px;">📊 Your Analytics</h2>
+
+        <!-- Summary Cards -->
+        <div class="stats-grid" style="margin-bottom:24px;">
+            <div class="stat-card">
+                <div class="stat-value" id="total-sessions">...</div>
+                <div class="stat-label">Total Sessions</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="total-hours">...</div>
+                <div class="stat-label">Total Study Time</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="avg-focus">...</div>
+                <div class="stat-label">Avg Focus Score</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="streak">...</div>
+                <div class="stat-label">Day Streak 🔥</div>
+            </div>
+        </div>
+
+        <!-- Daily Goal -->
+        <div class="card" style="margin-bottom:20px;">
+            <h3>🎯 Daily Study Goal</h3>
+            <div class="goal-row">
+                <div style="flex:1;">
+                    <div class="focus-bar-wrapper">
+                        <span id="today-label">Today: 0m</span>
+                        <span id="goal-label">Goal: 60m</span>
+                    </div>
+                    <div class="focus-bar-bg" style="margin-top:8px;">
+                        <div class="focus-bar-fill" id="goal-bar"></div>
+                    </div>
+                </div>
+                <div class="goal-setter">
+                    <input type="number" id="goal-input" placeholder="60" min="10" max="480" />
+                    <button type="button" onclick="setGoal()">Set Goal</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-grid" style="margin-bottom:20px;">
+            <div class="card">
+                <h3>Study Time by Subject (min)</h3>
+                <div id="no-subject-msg" style="color:#aaa; font-size:13px; display:none;">No session data yet.</div>
+                <canvas id="subjectChart"></canvas>
+            </div>
+            <div class="card">
+                <h3>Focus Score Trend</h3>
+                <div id="no-trend-msg" style="color:#aaa; font-size:13px; display:none;">No session data yet.</div>
+                <canvas id="trendChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Subject Breakdown -->
+        <div class="card" style="margin-bottom:20px;">
+            <h3>📚 Subject Breakdown</h3>
+            <div id="subject-table-wrapper">
+                <p style="color:#aaa; font-size:13px;">Loading...</p>
+            </div>
+        </div>
+
+        <!-- Smart Insights -->
+        <div class="card" style="margin-bottom:20px;">
+            <h3>💡 Smart Insights</h3>
+            <div id="insights-wrapper">
+                <p style="color:#aaa; font-size:13px;">Loading...</p>
+            </div>
+        </div>
+
+        <!-- Recent Sessions -->
+        <div class="card" style="margin-bottom:20px;">
+            <h3>🕘 Recent Sessions</h3>
+            <div id="sessions-table-wrapper">
+                <p style="color:#aaa; font-size:13px;">Loading...</p>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="js/nav.js"></script>
+    <script>
+        var API = "http://localhost:8000";
+        var token = localStorage.getItem("token");
+        if (!token) window.location.href = "index.html";
+
+        var headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + token
+        };
+
+        renderNav("analytics");
+
+        var subjectChartInstance = null;
+        var trendChartInstance = null;
+
+        async function loadAll() {
+            await loadSummary();
+            await loadSubjectChart();
+            await loadTrendChart();
+            await loadSubjectTable();
+            await loadInsights();
+            await loadHistory();
+        }
+
+        async function loadSummary() {
+            try {
+                var res = await fetch(API + "/analytics/summary", {
+                    headers: headers
+                });
+                if (!res.ok) throw new Error("Failed");
+                var d = await res.json();
+
+                document.getElementById("total-sessions").textContent = d.total_sessions;
+                var h = Math.floor(d.total_minutes / 60);
+                var m = d.total_minutes % 60;
+                document.getElementById("total-hours").textContent = h > 0 ? h + "h " + m + "m" : m + "m";
+                document.getElementById("avg-focus").textContent = d.avg_focus_score + "%";
+                document.getElementById("streak").textContent = d.streak + " days";
+
+                document.getElementById("today-label").textContent = "Today: " + d.today_minutes + "m";
+                document.getElementById("goal-label").textContent = "Goal: " + d.daily_goal_minutes + "m";
+                document.getElementById("goal-input").value = d.daily_goal_minutes;
+
+                var pct = Math.min(100, Math.round((d.today_minutes / d.daily_goal_minutes) * 100));
+                var bar = document.getElementById("goal-bar");
+                bar.style.width = pct + "%";
+                bar.style.background = pct >= 100 ? "#4caf50" : pct >= 50 ? "#ff9800" : "#4f9cf9";
+            } catch (e) {
+                console.error("Summary error:", e);
+                document.getElementById("total-sessions").textContent = "0";
+                document.getElementById("total-hours").textContent = "0m";
+                document.getElementById("avg-focus").textContent = "0%";
+                document.getElementById("streak").textContent = "0 days";
+            }
+        }
+
+        async function setGoal() {
+            var val = parseInt(document.getElementById("goal-input").value);
+            if (!val || val < 10) {
+                alert("Enter at least 10 minutes.");
+                return;
+            }
+            try {
+                await fetch(API + "/analytics/set-goal", {
+                    method: "POST",
+                    headers: headers,
+                    body: JSON.stringify({
+                        daily_goal_minutes: val
+                    })
+                });
+                await loadSummary();
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadSubjectChart() {
+            try {
+                var res = await fetch(API + "/analytics/by-subject", {
+                    headers: headers
+                });
+                var data = await res.json();
+
+                if (!data.length) {
+                    document.getElementById("no-subject-msg").style.display = "block";
+                    document.getElementById("subjectChart").style.display = "none";
+                    return;
+                }
+
+                document.getElementById("no-subject-msg").style.display = "none";
+                document.getElementById("subjectChart").style.display = "block";
+
+                if (subjectChartInstance) subjectChartInstance.destroy();
+
+                var ctx = document.getElementById("subjectChart").getContext("2d");
+                subjectChartInstance = new Chart(ctx, {
+                    type: "bar",
+                    data: {
+                        labels: data.map(function(d) {
+                            return d.subject;
+                        }),
+                        datasets: [{
+                            label: "Minutes",
+                            data: data.map(function(d) {
+                                return d.minutes;
+                            }),
+                            backgroundColor: "#4f9cf9",
+                            borderRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: {
+                                    color: "#aaa"
+                                },
+                                grid: {
+                                    color: "#222"
+                                }
+                            },
+                            y: {
+                                ticks: {
+                                    color: "#aaa"
+                                },
+                                grid: {
+                                    color: "#222"
+                                },
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("Subject chart error:", e);
+            }
+        }
+
+        async function loadTrendChart() {
+            try {
+                var res = await fetch(API + "/analytics/focus-trend", {
+                    headers: headers
+                });
+                var data = await res.json();
+
+                if (!data.length) {
+                    document.getElementById("no-trend-msg").style.display = "block";
+                    document.getElementById("trendChart").style.display = "none";
+                    return;
+                }
+
+                document.getElementById("no-trend-msg").style.display = "none";
+                document.getElementById("trendChart").style.display = "block";
+
+                if (trendChartInstance) trendChartInstance.destroy();
+
+                var ctx = document.getElementById("trendChart").getContext("2d");
+                trendChartInstance = new Chart(ctx, {
+                    type: "line",
+                    data: {
+                        labels: data.map(function(d, i) {
+                            return d.label || ("S" + (i + 1));
+                        }),
+                        datasets: [{
+                            label: "Focus %",
+                            data: data.map(function(d) {
+                                return d.focus_score;
+                            }),
+                            borderColor: "#4caf50",
+                            backgroundColor: "rgba(76,175,80,0.1)",
+                            tension: 0.4,
+                            fill: true,
+                            pointBackgroundColor: "#4caf50",
+                            pointRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: {
+                                labels: {
+                                    color: "#aaa"
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: {
+                                    color: "#aaa"
+                                },
+                                grid: {
+                                    color: "#222"
+                                }
+                            },
+                            y: {
+                                min: 0,
+                                max: 100,
+                                ticks: {
+                                    color: "#aaa",
+                                    callback: function(v) {
+                                        return v + "%";
+                                    }
+                                },
+                                grid: {
+                                    color: "#222"
+                                }
+                            }
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("Trend chart error:", e);
+            }
+        }
+
+        async function loadSubjectTable() {
+            try {
+                var res = await fetch(API + "/analytics/by-subject", {
+                    headers: headers
+                });
+                var data = await res.json();
+                var el = document.getElementById("subject-table-wrapper");
+
+                if (!data.length) {
+                    el.innerHTML = "<p style='color:#aaa; font-size:13px;'>No sessions yet. Start studying!</p>";
+                    return;
+                }
+
+                var html = "<table class='sessions-table'><thead><tr>";
+                html += "<th>Subject</th><th>Sessions</th><th>Total Time</th><th>Avg Focus</th>";
+                html += "</tr></thead><tbody>";
+                data.forEach(function(d) {
+                    var fc = d.avg_focus >= 70 ? "#4caf50" : d.avg_focus >= 40 ? "#ff9800" : "#f44336";
+                    html += "<tr><td>" + d.subject + "</td><td>" + d.sessions + "</td><td>" + d.minutes + "m</td>";
+                    html += "<td style='color:" + fc + "; font-weight:bold;'>" + d.avg_focus + "%</td></tr>";
+                });
+                html += "</tbody></table>";
+                el.innerHTML = html;
+            } catch (e) {
+                console.error("Subject table error:", e);
+            }
+        }
+
+        async function loadInsights() {
+            try {
+                var res = await fetch(API + "/analytics/insights", {
+                    headers: headers
+                });
+                var data = await res.json();
+                var el = document.getElementById("insights-wrapper");
+                if (!data.insights || !data.insights.length) {
+                    el.innerHTML = "<p style='color:#aaa; font-size:13px;'>Complete a session to get insights.</p>";
+                    return;
+                }
+                var html = "";
+                data.insights.forEach(function(tip) {
+                    html += "<div class='insight-item'>" + tip + "</div>";
+                });
+                el.innerHTML = html;
+            } catch (e) {
+                console.error("Insights error:", e);
+            }
+        }
+
+        async function loadHistory() {
+            try {
+                var res = await fetch(API + "/session/history", {
+                    headers: headers
+                });
+                var data = await res.json();
+                var el = document.getElementById("sessions-table-wrapper");
+
+                if (!data.length) {
+                    el.innerHTML = "<p style='color:#aaa; font-size:13px;'>No sessions yet.</p>";
+                    return;
+                }
+
+                var html = "<table class='sessions-table'><thead><tr>";
+                html += "<th>Subject</th><th>Planned</th><th>Actual</th><th>Focus</th><th>Status</th><th>Date</th>";
+                html += "</tr></thead><tbody>";
+
+                data.forEach(function(s) {
+                    var sc = s.status === "completed" ? "status-done" : "status-abandoned";
+                    var fc = s.focus_score >= 70 ? "#4caf50" : s.focus_score >= 40 ? "#ff9800" : "#f44336";
+                    html += "<tr>";
+                    html += "<td>" + s.subject + "</td>";
+                    html += "<td>" + s.planned_duration + "m</td>";
+                    html += "<td>" + s.actual_duration + "m</td>";
+                    html += "<td style='color:" + fc + "; font-weight:bold;'>" + (s.focus_score || 0) + "%</td>";
+                    html += "<td><span class='status-badge " + sc + "'>" + s.status + "</span></td>";
+                    html += "<td style='color:#aaa; font-size:12px;'>" + s.started_at + "</td>";
+                    html += "</tr>";
+                });
+
+                html += "</tbody></table>";
+                el.innerHTML = html;
+            } catch (e) {
+                console.error("History error:", e);
+            }
+        }
+
+        loadAll();
+    </script>
+</body>
+
+</html>
